@@ -15,6 +15,15 @@ first symbolication effort accidentally proved the second one mattered too:
 Both root causes, and both fixes, are below in the order they were actually
 found, since each one changed what the next investigation needed to look at.
 
+## Current browser runtime settings
+
+The 59fps observations in the historical investigation below describe the test
+build used at that time. The current browser scheduler now defaults to **50 FPS**
+and supports user-selectable 30, 40, or 50 FPS. It is configurable from the
+web-shell Settings panel; the native frame-limiter path remains unchanged.
+Graphics, render scale, and the streaming model-cache budget are documented in
+[Browser Settings](BROWSER_SETTINGS.md).
+
 ## The reported crash
 
 ```
@@ -430,8 +439,9 @@ confirming the fix itself, not the frame rate, is what makes it safe.
 - `src/fakerw/fake.cpp` -- per-atomic render-callback plugin storage (the
   actual crash fix). Not `__EMSCRIPTEN__`-guarded: a genuine cross-platform
   correctness fix, not a platform workaround.
-- `src/skel/glfw/glfw.cpp` -- `re3EmscriptenFrameDue()` self-correcting 59fps
-  scheduler, applied to both `GS_PLAYING_GAME` and `GS_FRONTEND`; new
+- `src/skel/glfw/glfw.cpp` -- `re3EmscriptenFrameDue()` self-correcting
+  browser scheduler (30/40/50 FPS, default 50), applied to both
+  `GS_PLAYING_GAME` and `GS_FRONTEND`; new
   `g_re3TickCallCount` counter and `re3_GetTickCallCount()` export, all
   `#ifdef __EMSCRIPTEN__`-guarded. Native's original
   `m_PrefsFrameLimiter`/`RsGlobal.maxFPS`-driven check is untouched in its
