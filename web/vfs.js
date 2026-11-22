@@ -53,6 +53,11 @@
 		FS.writeFile(absPath, data);
 	}
 
+	async function writeBlobIntoVFS(FS, absPath, file) {
+		const buffer = await file.arrayBuffer();
+		writeFileDeep(FS, absPath, new Uint8Array(buffer));
+	}
+
 	// --- mounting strategies ---------------------------------------------------
 
 	/** Bare MEMFS directory at mountPoint, nothing persisted. Always safe, always
@@ -103,7 +108,10 @@
 	 */
 	async function mountFromFileList(FS, mountPoint, fileList, { onProgress } = {}) {
 		ensureMountPoint(FS, mountPoint);
-		const files = Array.from(fileList);
+		// Keep the browser's FileList instead of allocating a second array of File
+		// references. File bytes are copied one file at a time; never collect the
+		// whole game folder into a JavaScript-side byte array.
+		const files = fileList;
 		let done = 0;
 		for (const file of files) {
 			const rel = file.relativePath || file.webkitRelativePath || file.name;
@@ -112,10 +120,13 @@
 			// with the manifest, which is relative to the *contents* of that folder.
 			const trimmed = rel.includes("/") ? rel.slice(rel.indexOf("/") + 1) : rel;
 			if (!trimmed) continue;
-			const buf = new Uint8Array(await file.arrayBuffer());
-			writeFileDeep(FS, joinPath(mountPoint, trimmed), buf);
+			await writeBlobIntoVFS(FS, joinPath(mountPoint, trimmed), file);
 			done++;
 			onProgress?.(done, files.length, trimmed);
+			// Yield periodically so large imports keep the page responsive. The
+			// Emscripten VFS owns the bytes after writeFile; the temporary ArrayBuffer
+			// remains scoped to writeBlobIntoVFS and can be reclaimed by the GC.
+			if (done % 8 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
 		}
 		return done;
 	}
