@@ -60,7 +60,57 @@
 		saveTable: document.getElementById("save-table"),
 		saveForceSyncBtn: document.getElementById("save-force-sync-btn"),
 		saveClearBtn: document.getElementById("save-clear-btn"),
+		settingsBtn: document.getElementById("settings-btn"),
+		settingsPanel: document.getElementById("settings-panel"),
+		settingsCloseBtn: document.getElementById("settings-close-btn"),
+		graphicsQuality: document.getElementById("graphics-quality"),
+		fpsLimit: document.getElementById("fps-limit"),
+		renderScale: document.getElementById("render-scale"),
+		memoryMode: document.getElementById("memory-mode"),
+		lodDistance: document.getElementById("lod-distance"),
+		lodValue: document.getElementById("lod-value"),
+		motionTrails: document.getElementById("motion-trails"),
+		settingsNote: document.getElementById("settings-note"),
 	};
+
+	const SETTINGS_STORAGE_KEY = "re3-browser-settings-v1";
+	const MEMORY_BUDGET_MB = { low: 80, balanced: 123, high: 160 };
+	const QUALITY_PRESETS = {
+		performance: { lod: 0.8, trails: false },
+		balanced: { lod: 1.2, trails: true },
+		high: { lod: 1.8, trails: true },
+	};
+
+	function loadGameSettings() {
+		const defaults = {
+			graphicsQuality: "balanced",
+			fpsLimit: 50,
+			renderScale: 1,
+			memoryMode: "balanced",
+			lod: 1.2,
+			motionTrails: true,
+		};
+		try {
+			const saved = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || "null");
+			if (!saved || typeof saved !== "object") return defaults;
+			return {
+				graphicsQuality: ["performance", "balanced", "high", "custom"].includes(saved.graphicsQuality)
+					? saved.graphicsQuality : defaults.graphicsQuality,
+				fpsLimit: [30, 40, 50].includes(Number(saved.fpsLimit)) ? Number(saved.fpsLimit) : defaults.fpsLimit,
+				renderScale: [0.5, 0.75, 1].includes(Number(saved.renderScale)) ? Number(saved.renderScale) : defaults.renderScale,
+				memoryMode: Object.prototype.hasOwnProperty.call(MEMORY_BUDGET_MB, saved.memoryMode)
+					? saved.memoryMode : defaults.memoryMode,
+				lod: Number.isFinite(Number(saved.lod)) ? Math.min(1.8, Math.max(0.8, Number(saved.lod))) : defaults.lod,
+				motionTrails: typeof saved.motionTrails === "boolean" ? saved.motionTrails : defaults.motionTrails,
+			};
+		} catch {
+			return defaults;
+		}
+	}
+
+	const settings = loadGameSettings();
+	let settingsApi = null;
+	let engineStarted = false;
 
 	// Boot progress (Phase 9, docs/FIRST_BOOT.md): created immediately -- it
 	// doesn't depend on the module having loaded, only on the DOM. renderAssetValidation()
@@ -177,11 +227,15 @@
 		let version = null;
 		if (gl) {
 			version = gl.getParameter(gl.VERSION);
+			gl.getExtension("WEBGL_lose_context")?.loseContext();
 			return { available: true, contextType: "webgl2", version };
 		}
 		gl = probe.getContext("webgl") || probe.getContext("experimental-webgl");
 		if (gl) {
 			version = gl.getParameter(gl.VERSION);
+			// The probe only needs the version string. Release this throwaway
+			// context before the real game renderer creates its own context.
+			gl.getExtension("WEBGL_lose_context")?.loseContext();
 			return { available: true, contextType: "webgl", version };
 		}
 		return { available: false, contextType: null, version: null };
@@ -224,12 +278,64 @@
 		const rect = els.canvas.getBoundingClientRect();
 		setDiag("Canvas CSS size", `${Math.round(rect.width)} x ${Math.round(rect.height)}`);
 		setDiag("Canvas backing size", `${els.canvas.width} x ${els.canvas.height}`);
+		setDiag("Render scale", `${Math.round(settings.renderScale * 100)}%`);
 		// DevTools-dependency debugging: opening/docking DevTools resizes the
 		// viewport, which is exactly what these three track -- compare them with
 		// DevTools open vs closed to see what (if anything) actually differs.
 		setDiag("window.innerWidth x innerHeight", `${window.innerWidth} x ${window.innerHeight}`);
 		setDiag("document.hidden", String(document.hidden));
 		setDiag("document.visibilityState", document.visibilityState);
+	}
+
+	function updateAssetVfsMemoryDiagnostics(instance, mountPoint) {
+		try {
+			const FS = instance.FS;
+			const pending = [mountPoint];
+			let fileCount = 0;
+			let totalBytes = 0;
+			while (pending.length) {
+				const dir = pending.pop();
+				for (const name of FS.readdir(dir)) {
+					if (name === "." || name === "..") continue;
+					const path = dir.replace(/\/$/, "") + "/" + name;
+					const stat = FS.stat(path);
+					if (FS.isDir(stat.mode)) pending.push(path);
+					else {
+						fileCount++;
+						totalBytes += Number(stat.size) || 0;
+					}
+				}
+			}
+			setDiag("Game VFS assets", `${fileCount} files / ${(totalBytes / (1024 * 1024)).toFixed(1)} MiB`);
+		} catch (err) {
+			setDiag("Game VFS assets", `unavailable (${err.message || err})`, "warn");
+		}
+	}
+
+	function setupMemoryDiagnostics(instance) {
+		let getStreamingUsed = null;
+		let getStreamingBudget = null;
+		try { getStreamingUsed = instance.cwrap("re3_GetStreamingMemoryUsedMB", "number", []); } catch { /* older WASM build */ }
+		try { getStreamingBudget = instance.cwrap("re3_GetStreamingMemoryBudgetMB", "number", []); } catch { /* older WASM build */ }
+
+		function poll() {
+			try {
+				const wasmBytes = instance.HEAPU8?.buffer?.byteLength || instance.wasmMemory?.buffer?.byteLength || 0;
+				setDiag("WASM linear memory", wasmBytes ? `${(wasmBytes / (1024 * 1024)).toFixed(1)} MiB` : "not exposed");
+			} catch { /* best effort */ }
+			try {
+				const jsBytes = performance.memory?.usedJSHeapSize;
+				setDiag("JS heap (Chromium)", Number.isFinite(jsBytes) ? `${(jsBytes / (1024 * 1024)).toFixed(1)} MiB` : "not exposed");
+			} catch { /* not supported by every browser */ }
+			const canvasBytes = els.canvas.width * els.canvas.height * 4;
+			setDiag("Canvas RGBA buffer (minimum)", `${(canvasBytes / (1024 * 1024)).toFixed(1)} MiB`);
+			try {
+				if (getStreamingUsed) setDiag("Streaming model cache used", `${getStreamingUsed()} MiB`);
+				if (getStreamingBudget) setDiag("Streaming model cache budget", `${getStreamingBudget()} MiB`);
+			} catch { /* an old or partially initialized module */ }
+			setTimeout(poll, 2000);
+		}
+		poll();
 	}
 
 	// GS_* names mirror src/skel/crossplatform.h exactly (re3_GetGameState()
@@ -335,12 +441,13 @@
 	function resizeCanvasToDisplaySize() {
 		const dpr = window.devicePixelRatio || 1;
 		const rect = els.viewport.getBoundingClientRect();
-		const width = Math.max(1, Math.round(rect.width * dpr));
-		const height = Math.max(1, Math.round(rect.height * dpr));
+		const scale = settings.renderScale;
+		const width = Math.max(1, Math.round(rect.width * dpr * scale));
+		const height = Math.max(1, Math.round(rect.height * dpr * scale));
 		if (els.canvas.width !== width || els.canvas.height !== height) {
 			els.canvas.width = width;
 			els.canvas.height = height;
-			log(`[canvas] resized to ${width}x${height} (dpr=${dpr})`, "info");
+			log(`[canvas] resized to ${width}x${height} (dpr=${dpr}, renderScale=${scale})`, "info");
 		}
 		updateCanvasDiagnostics();
 	}
@@ -389,6 +496,115 @@
 		els.diagnosticsBtn.addEventListener("click", () => {
 			els.sidepanel.classList.toggle("open");
 		});
+	}
+
+	function applyFrameAndMemorySettings() {
+		try { settingsApi?.setFrameLimit?.(settings.fpsLimit); } catch (err) {
+			log(`[settings] FPS limit could not be applied: ${err}`, "stderr");
+		}
+		try { settingsApi?.setStreamingBudget?.(MEMORY_BUDGET_MB[settings.memoryMode]); } catch (err) {
+			log(`[settings] memory budget could not be applied: ${err}`, "stderr");
+		}
+	}
+
+	function applyRunningGraphicsSettings() {
+		if (!engineStarted) return;
+		try { settingsApi?.setGraphicsOptions?.(settings.lod, settings.motionTrails ? 1 : 0); }
+		catch (err) { log(`[settings] graphics options could not be applied: ${err}`, "stderr"); }
+	}
+
+	function setupSettingsPanel(instance) {
+		const safeCwrap = (name, returnType, argTypes) => {
+			try { return instance.cwrap(name, returnType, argTypes); }
+			catch (err) {
+				log(`[settings] ${name} is unavailable; rebuild the WASM target to enable it`, "stderr");
+				return null;
+			}
+		};
+		settingsApi = {
+			setFrameLimit: safeCwrap("re3_SetFrameLimit", "number", ["number"]),
+			setStreamingBudget: safeCwrap("re3_SetStreamingBudgetMB", null, ["number"]),
+			setGraphicsOptions: safeCwrap("re3_SetGraphicsOptions", null, ["number", "number"]),
+		};
+
+		function save() {
+			try { localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings)); }
+			catch (err) { log(`[settings] could not save preferences: ${err}`, "stderr"); }
+		}
+
+		function renderControls() {
+			els.graphicsQuality.value = settings.graphicsQuality;
+			els.fpsLimit.value = String(settings.fpsLimit);
+			els.renderScale.value = String(settings.renderScale);
+			els.memoryMode.value = settings.memoryMode;
+			els.lodDistance.value = String(settings.lod);
+			els.lodValue.textContent = `${settings.lod.toFixed(1)}×`;
+			els.motionTrails.checked = settings.motionTrails;
+		}
+
+		function closePanel() {
+			els.settingsPanel.classList.add("hidden");
+			els.settingsBtn.setAttribute("aria-expanded", "false");
+		}
+		els.settingsBtn.addEventListener("click", () => {
+			const opening = els.settingsPanel.classList.contains("hidden");
+			els.settingsPanel.classList.toggle("hidden", !opening);
+			els.settingsBtn.setAttribute("aria-expanded", String(opening));
+		});
+		els.settingsCloseBtn.addEventListener("click", closePanel);
+		document.addEventListener("pointerdown", (event) => {
+			if (!els.settingsPanel.contains(event.target) && event.target !== els.settingsBtn)
+				closePanel();
+		});
+		document.addEventListener("keydown", (event) => {
+			if (event.key === "Escape") closePanel();
+		});
+
+		els.graphicsQuality.addEventListener("change", () => {
+			settings.graphicsQuality = els.graphicsQuality.value;
+			const preset = QUALITY_PRESETS[settings.graphicsQuality];
+			if (preset) {
+				settings.lod = preset.lod;
+				settings.motionTrails = preset.trails;
+				renderControls();
+			}
+			save();
+			applyRunningGraphicsSettings();
+		});
+		els.fpsLimit.addEventListener("change", () => {
+			settings.fpsLimit = Number(els.fpsLimit.value);
+			save();
+			applyFrameAndMemorySettings();
+		});
+		els.renderScale.addEventListener("change", () => {
+			settings.renderScale = Number(els.renderScale.value);
+			save();
+			resizeCanvasToDisplaySize();
+		});
+		els.memoryMode.addEventListener("change", () => {
+			settings.memoryMode = els.memoryMode.value;
+			save();
+			applyFrameAndMemorySettings();
+			els.settingsNote.textContent = "The selected budget controls the engine's streaming model cache. Already-loaded models are released as the game requests more space.";
+		});
+		els.lodDistance.addEventListener("input", () => {
+			settings.lod = Number(els.lodDistance.value);
+			settings.graphicsQuality = "custom";
+			els.graphicsQuality.value = "custom";
+			els.lodValue.textContent = `${settings.lod.toFixed(1)}×`;
+			save();
+			applyRunningGraphicsSettings();
+		});
+		els.motionTrails.addEventListener("change", () => {
+			settings.motionTrails = els.motionTrails.checked;
+			settings.graphicsQuality = "custom";
+			els.graphicsQuality.value = "custom";
+			save();
+			applyRunningGraphicsSettings();
+		});
+
+		renderControls();
+		applyFrameAndMemorySettings();
 	}
 
 	function setupInputDebugToggle() {
@@ -489,6 +705,7 @@
 		}
 
 		await revalidateAssets(instance, mountPoint, manifest);
+		updateAssetVfsMemoryDiagnostics(instance, mountPoint);
 
 		els.pickFolderBtn.addEventListener("click", () => els.folderInput.click());
 		els.folderInput.addEventListener("change", async () => {
@@ -516,6 +733,7 @@
 				els.folderInput.value = "";
 			}
 			await revalidateAssets(instance, mountPoint, manifest);
+			updateAssetVfsMemoryDiagnostics(instance, mountPoint);
 		});
 
 		if (devAssetsRequested()) {
@@ -538,6 +756,7 @@
 					els.devMountBtn.textContent = originalLabel;
 				}
 				await revalidateAssets(instance, mountPoint, manifest);
+				updateAssetVfsMemoryDiagnostics(instance, mountPoint);
 			});
 		}
 
@@ -557,6 +776,7 @@
 	// virtual filesystem -- FS.syncfs(true) is asynchronous, so this is a real
 	// ordering requirement, not a formality.
 	async function runEngineMain(instance, mountPoint, focusRecovery, tabThrottling) {
+		applyFrameAndMemorySettings();
 		setStatus("loading", "restoring saved games…");
 		try {
 			await Re3Saves.mountAndRestore(instance, mountPoint, log);
@@ -589,6 +809,8 @@
 		try {
 			setStatus("loading", "running re3 initialization…");
 			const rc = instance.callMain([]);
+			engineStarted = true;
+			applyRunningGraphicsSettings();
 			setDiag("Engine initialized", "true (main returned)", true);
 			setStatus("ok", `re3 main() returned ${rc}`);
 			log(`[module] main() returned ${rc}`, "info");
@@ -674,6 +896,8 @@
 		}
 
 		window.re3Module = instance; // for manual poking from devtools
+		setupSettingsPanel(instance);
+		setupMemoryDiagnostics(instance);
 		setDiag("WASM loaded", "true", true);
 		hideLoadingOverlay();
 		log("[module] instantiated successfully", "info");
