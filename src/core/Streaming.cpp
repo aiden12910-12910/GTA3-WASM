@@ -36,6 +36,9 @@
 #include "Font.h"
 #include "MemoryMgr.h"
 #include "MemoryHeap.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 bool CStreaming::ms_disableStreaming;
 bool CStreaming::ms_bLoadingBigModel;
@@ -73,6 +76,42 @@ int32 CStreaming::ms_imageSize;
 size_t CStreaming::ms_memoryAvailable;
 
 int32 desiredNumVehiclesLoaded = 12;
+
+#ifdef __EMSCRIPTEN__
+// Browser-selected streaming budget. The default stays at the engine's existing
+// 256MB-assumed calculation unless the user selects a memory mode.
+static size_t g_re3StreamingBudgetOverrideBytes = 0;
+
+static void
+re3UpdateDesiredNumVehiclesLoaded(void)
+{
+	const size_t memoryMB = CStreaming::ms_memoryAvailable / (1024 * 1024);
+	const size_t vehicleBudget = memoryMB > 50 ? (memoryMB - 50) / 3 + 12 : 12;
+	desiredNumVehiclesLoaded = (int32)Min((size_t)MAXVEHICLESLOADED, vehicleBudget);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void
+re3_SetStreamingBudgetMB(int memoryMB)
+{
+	if (memoryMB != 80 && memoryMB != 123 && memoryMB != 160)
+		return;
+	g_re3StreamingBudgetOverrideBytes = (size_t)memoryMB * 1024 * 1024;
+	CStreaming::ms_memoryAvailable = g_re3StreamingBudgetOverrideBytes;
+	re3UpdateDesiredNumVehiclesLoaded();
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int
+re3_GetStreamingMemoryBudgetMB(void)
+{
+	return (int)(CStreaming::ms_memoryAvailable / (1024 * 1024));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int
+re3_GetStreamingMemoryUsedMB(void)
+{
+	return (int)(CStreaming::ms_memoryUsed / (1024 * 1024));
+}
+#endif
 
 CEntity *pIslandLODindustEntity;
 CEntity *pIslandLODcomIndEntity;
@@ -223,9 +262,15 @@ CStreaming::Init2(void)
 	ms_memoryAvailable = (_dwMemAvailPhys - 10*MB)/2;
 	if(ms_memoryAvailable < 50*MB)
 		ms_memoryAvailable = 50*MB;
+#ifdef __EMSCRIPTEN__
+	if(g_re3StreamingBudgetOverrideBytes != 0)
+		ms_memoryAvailable = g_re3StreamingBudgetOverrideBytes;
+	re3UpdateDesiredNumVehiclesLoaded();
+#else
 	desiredNumVehiclesLoaded = (int32)((ms_memoryAvailable / MB - 50) / 3 + 12);
 	if(desiredNumVehiclesLoaded > MAXVEHICLESLOADED)
 		desiredNumVehiclesLoaded = MAXVEHICLESLOADED;
+#endif
 	debug("Memory allocated to Streaming is %zuMB", ms_memoryAvailable/MB); // original modifier was %d
 #undef MB
 #endif
@@ -2693,9 +2738,17 @@ CStreaming::MakeSpaceFor(int32 size)
 	}
 #undef MB
 #endif
-	while(ms_memoryUsed >= ms_memoryAvailable - size)
+	const size_t requestedBytes = size > 0 ? (size_t)size : 0;
+	// Avoid size_t underflow when a single requested model is larger than the
+	// configured cache budget. Free whatever is safely removable, then let the
+	// normal loader handle that one oversized asset rather than looping forever.
+	if(requestedBytes >= ms_memoryAvailable) {
+		DeleteRwObjectsBehindCamera(0);
+		return;
+	}
+	while(ms_memoryUsed >= ms_memoryAvailable - requestedBytes)
 		if(!RemoveLeastUsedModel()) {
-			DeleteRwObjectsBehindCamera(ms_memoryAvailable - size);
+			DeleteRwObjectsBehindCamera(ms_memoryAvailable - requestedBytes);
 			return;
 		}
 }
