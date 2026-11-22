@@ -43,6 +43,7 @@
 	const SYNCING = "syncing";
 	let state = IDLE;
 	let pending = false;
+	let syncPromise = null;
 	let lastSyncResult = null; // "success" | "failure" | null (never synced yet)
 	let lastSyncError = null;
 	let lastSyncAt = null;
@@ -64,7 +65,7 @@
 	// entry isn't in my remote set, remove it", it calls FS.rmdir() on a live
 	// mountpoint, which throws (ErrnoError errno 10). Calling the save mount's own
 	// `type.syncfs` directly scopes the operation to exactly this one mount, so it
-	// can never touch (or be touched by) the asset tree's own sync.
+	// can never touch (or be touched by) the asset tree's own reconciliation.
 	function syncfsAsync(populate) {
 		return new Promise((resolve, reject) => {
 			saveMount.type.syncfs(saveMount, populate, (err) => (err ? reject(err) : resolve()));
@@ -93,19 +94,20 @@
 	}
 
 	function requestSync() {
-		if (!FS || !saveDir) return; // not mounted (never mounted, or IDBFS unavailable)
+		if (!FS || !saveDir) return Promise.reject(new Error("save directory is not available"));
 		if (state === SYNCING) {
 			pending = true; // coalesce -- never start a second overlapping syncfs()
-			return;
+			return syncPromise;
 		}
-		runSync();
+		syncPromise = runSync().finally(() => { syncPromise = null; });
+		return syncPromise;
 	}
 
 	/** Called directly from C++ (src/save/PCSave.cpp) right after a save/delete. */
 	function onSaveDirChanged(reason, filename) {
 		logFn(reason === "delete" ? `[Save] Save deleted: ${filename}` : `[Save] Save written: ${filename}`, "info");
 		logFn("[Save] Syncing to IndexedDB…", "info");
-		requestSync();
+		requestSync().catch(() => {});
 	}
 
 	/**
@@ -156,12 +158,59 @@
 			logFn(`[Save] ERROR: could not restore saves from IndexedDB: ${err}`, "stderr");
 		}
 		onStateChange(); // see comment in the failure branch above
+		setSaveButtonsReady(true);
 	}
 
 	/** Developer control: sync now instead of waiting for the next save. */
 	function forceSync() {
-		if (!FS || !saveDir) return;
-		requestSync();
+		return requestSync();
+	}
+
+	/** Read all PC save slots as one portable JSON backup. */
+	function exportSaveBundle() {
+		if (!FS || !saveDir) throw new Error("save directory is not available");
+		const saves = FS.readdir(saveDir)
+			.filter((name) => /^GTA3sf[1-8]\.b$/i.test(name))
+			.map((name) => ({
+				name,
+				data: bytesToBase64(FS.readFile(`${saveDir}/${name}`)),
+			}));
+		if (!saves.length) throw new Error("No GTA III save files were found in this browser.");
+		return { format: "gta3-wasm-saves-v1", saves };
+	}
+
+	/** Import one native .b save, or a JSON bundle produced by exportSaveBundle(). */
+	async function importSaveFile(file) {
+		if (!FS || !saveDir) throw new Error("save directory is not available");
+		const writes = [];
+		if (/^GTA3sf[1-8]\.b$/i.test(file.name)) {
+			if (file.size > 5 * 1024 * 1024) throw new Error("The save file is unexpectedly large.");
+			writes.push([file.name, new Uint8Array(await file.arrayBuffer())]);
+		} else if (/\.json$/i.test(file.name)) {
+			if (file.size > 32 * 1024 * 1024) throw new Error("The save backup is too large.");
+			const bundle = JSON.parse(await file.text());
+			if (!bundle || bundle.format !== "gta3-wasm-saves-v1" || !Array.isArray(bundle.saves)) {
+				throw new Error("This is not a GTA3-WASM save backup.");
+			}
+			for (const save of bundle.saves) {
+				if (!save || !/^GTA3sf[1-8]\.b$/i.test(save.name) || typeof save.data !== "string" ||
+					!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(save.data)) {
+					throw new Error("The backup contains an invalid save entry.");
+				}
+				const binary = atob(save.data);
+				if (binary.length > 5 * 1024 * 1024) throw new Error("A save file in the backup is unexpectedly large.");
+				writes.push([save.name, Uint8Array.from(binary, (char) => char.charCodeAt(0))]);
+			}
+		} else {
+			throw new Error("Choose a GTA3sf1.b–GTA3sf8.b save or a GTA3-WASM JSON backup.");
+		}
+		if (!writes.length) throw new Error("The backup contains no save files.");
+		const existing = writes.filter(([name]) => FS.analyzePath(`${saveDir}/${name}`).exists);
+		if (existing.length && !confirm(`Overwrite existing save slot(s): ${existing.map(([name]) => name).join(", ")}?`)) return false;
+		for (const [name, data] of writes) FS.writeFile(`${saveDir}/${name}`, data);
+		await requestSync();
+		if (lastSyncResult === "failure") throw new Error(`Save import could not be persisted: ${lastSyncError}`);
+		return true;
 	}
 
 	/** Developer control: destructive -- caller (launcher.js) must confirm first. */
@@ -194,12 +243,105 @@
 		onStateChange = fn || (() => {});
 	}
 
+	function bytesToBase64(bytes) {
+		let binary = "";
+		const chunkSize = 0x8000;
+		for (let i = 0; i < bytes.length; i += chunkSize) {
+			binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+		}
+		return btoa(binary);
+	}
+
+	// Add the save backup controls to the existing top bar without changing the
+	// game's HTML structure. The file input opens the browser's native picker.
+	let exportButton = null;
+	let importButton = null;
+	let importInput = null;
+	function setSaveButtonsReady(ready) {
+		if (exportButton) exportButton.disabled = !ready;
+		if (importButton) importButton.disabled = !ready;
+	}
+
+	function addSaveButtons() {
+		const topbar = document.getElementById("topbar");
+		if (!topbar || document.getElementById("save-export-btn")) return;
+		exportButton = document.createElement("button");
+		exportButton.id = "save-export-btn";
+		exportButton.type = "button";
+		exportButton.textContent = "Download saves";
+		exportButton.title = "Download browser saves as a GTA3-WASM backup file";
+		exportButton.disabled = true;
+		importButton = document.createElement("button");
+		importButton.id = "save-import-btn";
+		importButton.type = "button";
+		importButton.textContent = "Upload save";
+		importButton.title = "Import a GTA III save file or GTA3-WASM backup from this computer";
+		importButton.disabled = true;
+		importInput = document.createElement("input");
+		importInput.type = "file";
+		importInput.accept = ".b,.json,application/json";
+		importInput.hidden = true;
+		const spacer = topbar.querySelector(".spacer");
+		topbar.insertBefore(exportButton, spacer || null);
+		topbar.insertBefore(importButton, spacer || null);
+		topbar.appendChild(importInput);
+
+		exportButton.addEventListener("click", () => {
+			try {
+				const bundle = exportSaveBundle();
+				const blob = new Blob([JSON.stringify(bundle)], { type: "application/json" });
+				const link = document.createElement("a");
+				link.href = URL.createObjectURL(blob);
+				link.download = `gta3-saves-${new Date().toISOString().slice(0, 10)}.json`;
+				link.click();
+				setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+			} catch (err) {
+				alert(err.message || String(err));
+			}
+		});
+		importButton.addEventListener("click", () => importInput.click());
+		importInput.addEventListener("change", async () => {
+			const file = importInput.files && importInput.files[0];
+			if (!file) return;
+			importButton.disabled = true;
+			try {
+				const imported = await importSaveFile(file);
+				if (imported) alert("Save imported and synced to this browser. Reopen the game's Load Game menu to see it.");
+			} catch (err) {
+				alert(err.message || String(err));
+				logFn(`[Save] ERROR: import failed: ${err.message || err}`, "stderr");
+			} finally {
+				importInput.value = "";
+				importButton.disabled = false;
+			}
+		});
+	}
+
+	function getStatus() {
+		return {
+			backend: FS && saveDir ? "IDBFS" : (FS ? "MEMFS (session-only)" : "not mounted"),
+			saveDir,
+			state,
+			lastSyncResult,
+			lastSyncError,
+			lastSyncAt,
+		};
+	}
+
+	function setOnStateChange(fn) {
+		onStateChange = fn || (() => {});
+	}
+
 	window.Re3Saves = {
 		mountAndRestore,
 		onSaveDirChanged,
 		forceSync,
 		clearSaves,
+		exportSaveBundle,
+		importSaveFile,
 		getStatus,
 		setOnStateChange,
 	};
+
+	addSaveButtons();
 })();
