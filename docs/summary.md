@@ -5,6 +5,7 @@
   - [WASM Porting Audit](WASM_PORTING_AUDIT.md)
   - [First Boot](FIRST_BOOT.md)
   - [Browser Runtime](BROWSER_RUNTIME.md)
+  - [Browser Settings](BROWSER_SETTINGS.md)
   - [Browser Main Loop](BROWSER_MAIN_LOOP.md)
   - [Browser Input](BROWSER_INPUT.md)
   - [Threading (WASM)](THREADING_WASM.md)
