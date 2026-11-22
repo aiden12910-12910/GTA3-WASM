@@ -70,6 +70,7 @@
 			<span class="title">GTA3 in your Browser</span>
 			<span id="status-text">Starting…</span>
 			<span id="fps-badge" class="fps-badge" title="Live FPS">FPS: -</span>
+			<button id="settings-btn" type="button" aria-controls="settings-panel" aria-expanded="false">Settings</button>
 			<span class="spacer"></span>
 			<label id="debug-mode-toggle" class="debug-toggle" title="Reschedule the main loop using setTimeout" hidden>
 				<input type="checkbox" id="debug-mode-checkbox" hidden> Debug mode
@@ -79,6 +80,58 @@
 			<button id="input-debug-btn" type="button" title="Toggle input debug panel" hidden>Input</button>
 			<button id="diagnostics-btn" type="button" title="Toggle diagnostics panel" hidden>Diagnostics</button>
 		</div>
+
+		<section id="settings-panel" class="settings-panel hidden" aria-label="Game settings">
+			<div class="settings-heading">
+				<h2>Game Settings</h2>
+				<button id="settings-close-btn" type="button" aria-label="Close settings">×</button>
+			</div>
+			<label class="setting-row" for="graphics-quality">
+				<span>Graphics quality</span>
+				<select id="graphics-quality">
+					<option value="performance">Performance</option>
+					<option value="balanced" selected>Balanced</option>
+					<option value="high">High</option>
+					<option value="custom">Custom</option>
+				</select>
+			</label>
+			<label class="setting-row" for="fps-limit">
+				<span>FPS limit</span>
+				<select id="fps-limit">
+					<option value="30">30 FPS</option>
+					<option value="40">40 FPS</option>
+					<option value="50" selected>50 FPS</option>
+				</select>
+			</label>
+			<label class="setting-row" for="render-scale">
+				<span>Render scale</span>
+				<select id="render-scale">
+					<option value="0.5">50% · lowest memory</option>
+					<option value="0.75">75% · performance</option>
+					<option value="1" selected>100% · native</option>
+				</select>
+			</label>
+			<label class="setting-row" for="memory-mode">
+				<span>Model memory budget</span>
+				<select id="memory-mode">
+					<option value="low">Low · 80 MB</option>
+					<option value="balanced" selected>Balanced · 123 MB</option>
+					<option value="high">High · 160 MB</option>
+				</select>
+			</label>
+			<div class="settings-advanced">
+				<div class="settings-subheading">Advanced graphics</div>
+				<label class="setting-row" for="lod-distance">
+					<span>LOD / draw distance <output id="lod-value">1.2×</output></span>
+					<input id="lod-distance" type="range" min="0.8" max="1.8" step="0.1" value="1.2">
+				</label>
+				<label class="setting-checkbox" for="motion-trails">
+					<input id="motion-trails" type="checkbox" checked>
+					<span>Motion trails</span>
+				</label>
+			</div>
+			<p id="settings-note" class="settings-note" role="status">Settings are saved in this browser. Lower render scale reduces the canvas buffer; memory budget controls the game's model cache.</p>
+		</section>
 
 		<div id="viewport">
 			<div id="error-banner">
@@ -190,11 +243,11 @@
 	     createRe3Module() factory (MODULARIZE=1, EXPORT_NAME=createRe3Module); it does
 	     not run anything on its own. -->
 	<script src="build/re3_wasm.js"></script>
-	<script src="vfs.js?v=9"></script>
-	<script src="saves.js?v=9"></script>
-	<script src="input.js?v=9"></script>
-	<script src="perf.js?v=9"></script>
-	<script src="boot.js?v=9"></script>
-	<script src="launcher.js?v=9"></script>
+	<script src="vfs.js?v=10"></script>
+	<script src="saves.js?v=10"></script>
+	<script src="input.js?v=10"></script>
+	<script src="perf.js?v=10"></script>
+	<script src="boot.js?v=10"></script>
+	<script src="launcher.js?v=10"></script>
 </body>
 </html>
