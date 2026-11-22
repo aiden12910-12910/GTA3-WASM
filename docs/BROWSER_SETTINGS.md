@@ -33,7 +33,10 @@ The canvas backing dimensions are multiplied by 50%, 75%, or 100% of the
 normal CSS-size-times-device-pixel-ratio dimensions. This reduces the canvas
 color-buffer footprint approximately with the square of the scale (before
 other WebGL attachments and driver allocations). The canvas continues to fill
-the same CSS viewport.
+the same CSS viewport. Choose the scale before starting the engine for immediate
+application. If the game is already running, the new choice is saved and takes
+effect after reloading the page; this avoids changing the WebGL drawing buffer
+without synchronizing RenderWare's camera raster.
 
 The diagnostics panel reports the canvas RGBA color-buffer lower-bound
 estimate. This is not a measurement of total GPU memory; depth/stencil buffers,
