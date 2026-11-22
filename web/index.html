@@ -71,8 +71,15 @@
 			<span id="status-text">Starting…</span>
 			<span id="fps-badge" class="fps-badge" title="Live FPS">FPS: -</span>
 			<span class="spacer"></span>
+			<label id="debug-mode-toggle" class="debug-toggle" title="Reschedule the main loop using setTimeout" hidden>
+				<input type="checkbox" id="debug-mode-checkbox" hidden> Debug mode
+			</label>
+			<a href="rendertest.html" style="color: var(--text-dim); font-size: 0.8rem; margin-right: 0.5rem;" hidden>WebGL diagnostic &rarr;</a>
 			<button id="fullscreen-btn" type="button" title="Toggle fullscreen">Fullscreen</button>
+			<button id="input-debug-btn" type="button" title="Toggle input debug panel" hidden>Input</button>
+			<button id="diagnostics-btn" type="button" title="Toggle diagnostics panel" hidden>Diagnostics</button>
 		</div>
+
 		<div id="viewport">
 			<div id="error-banner">
 				<div class="error-title">Runtime error</div>
