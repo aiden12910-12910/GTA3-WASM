@@ -721,3 +721,12 @@ noscript {
 		width: calc(100vw - .8rem);
 	}
 }
+
+
+#settings-close-btn {
+	background: #1c2027;
+	color: var(--text);
+	border: 1px solid var(--panel-border);
+	border-radius: 4px;
+	cursor: pointer;
+}
