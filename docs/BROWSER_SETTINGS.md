@@ -50,7 +50,9 @@ existing Emscripten assumption based on 256 MiB of available physical memory.
 The engine recalculates its desired number of loaded vehicles for the selected
 budget. A lower budget does not instantly destroy referenced resources: normal
 streaming eviction releases eligible objects as later loading requests need
-space.
+space. An individual model larger than the entire selected budget is still
+allowed to load; that one asset can temporarily push the actual cache above the
+target, because eviction cannot make the asset itself smaller.
 
 This is specifically the game's streaming model-cache budget, not a hard cap on
 total WebAssembly, JavaScript, browser, or GPU memory. High mode can increase
