@@ -2765,8 +2765,7 @@ main(int argc, char *argv[])
 					case GS_FRONTEND:
 					{
 #ifdef __EMSCRIPTEN__
-						// Same fixed frame budget (RE3_EMSCRIPTEN_FRAME_BUDGET_MS) and scheduler
-						// as GS_PLAYING_GAME below --
+						// Same configurable frame budget and scheduler as GS_PLAYING_GAME below --
 						// shared between them (only one of the two states is ever active at
 						// once), so the cadence stays consistent across the menu<->gameplay
 						// transition instead of resetting.
