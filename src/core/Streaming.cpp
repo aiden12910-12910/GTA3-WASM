@@ -87,7 +87,8 @@ re3UpdateDesiredNumVehiclesLoaded(void)
 {
 	const size_t memoryMB = CStreaming::ms_memoryAvailable / (1024 * 1024);
 	const size_t vehicleBudget = memoryMB > 50 ? (memoryMB - 50) / 3 + 12 : 12;
-	desiredNumVehiclesLoaded = (int32)Min((size_t)MAXVEHICLESLOADED, vehicleBudget);
+	desiredNumVehiclesLoaded = vehicleBudget > (size_t)MAXVEHICLESLOADED
+		? MAXVEHICLESLOADED : (int32)vehicleBudget;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void
