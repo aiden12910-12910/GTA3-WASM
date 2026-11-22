@@ -53,6 +53,8 @@ long _dwOperatingSystemVersion;
 #include "AnimViewer.h"
 #include "Font.h"
 #include "MemoryMgr.h"
+#include "Renderer.h"
+#include "MBlur.h"
 
 // We found out that GLFW's keyboard input handling is still pretty delayed/not stable, so now we fetch input from X11 directly on Linux.
 // Emscripten's GLFW port has no native X11 (or any native platform) backend, so it must always use GLFW's own key callback.
@@ -128,7 +130,13 @@ static bool g_re3LastFrameLimiterWillCall = false;
 // "browser vsync if available" was explicitly not what was wanted here. This
 // fixed budget replaces that native prefs-driven check, at the two call sites
 // below (GS_PLAYING_GAME's Idle() and GS_FRONTEND's FrontendIdle()).
-static const double RE3_EMSCRIPTEN_FRAME_BUDGET_MS = 1000.0 / 50.0; // 20.0ms
+static int g_re3FrameLimitFPS = 50;
+
+static double
+re3EmscriptenFrameBudgetMs()
+{
+	return 1000.0 / (double)g_re3FrameLimitFPS;
+}
 
 // A first version of this gate compared CTimer's own "time since the last
 // CTimer::Update()" against the budget and, when it passed, let CTimer::Update()
@@ -154,15 +162,16 @@ static bool
 re3EmscriptenFrameDue()
 {
 	double nowMs = (double)RsTimer();
+	const double budgetMs = re3EmscriptenFrameBudgetMs();
 	if (g_re3NextFrameTimeMs <= 0.0)
 		g_re3NextFrameTimeMs = nowMs;
 	if (nowMs < g_re3NextFrameTimeMs)
 		return false;
-	g_re3NextFrameTimeMs += RE3_EMSCRIPTEN_FRAME_BUDGET_MS;
+	g_re3NextFrameTimeMs += budgetMs;
 	// Long stall (backgrounded tab, suspended rAF): don't let the schedule
 	// fall so far behind that it tries to burst-fire makeup frames once
 	// ticking resumes -- just resume a fresh one-budget cadence from now.
-	if (g_re3NextFrameTimeMs < nowMs - RE3_EMSCRIPTEN_FRAME_BUDGET_MS)
+	if (g_re3NextFrameTimeMs < nowMs - budgetMs)
 		g_re3NextFrameTimeMs = nowMs;
 	return true;
 }
@@ -2002,6 +2011,38 @@ re3_SetDebugTiming(int enable)
 		emscripten_set_main_loop_timing(EM_TIMING_RAF, 1);
 }
 
+// Browser settings API. Keep this separate from the native display-refresh
+// limiter: the WebAssembly loop uses this validated target in both frontend
+// and gameplay states.
+extern "C" EMSCRIPTEN_KEEPALIVE int
+re3_SetFrameLimit(int fps)
+{
+	if (fps != 30 && fps != 40 && fps != 50)
+		return g_re3FrameLimitFPS;
+	g_re3FrameLimitFPS = fps;
+	g_re3NextFrameTimeMs = 0.0;
+	return g_re3FrameLimitFPS;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int
+re3_GetFrameLimit(void)
+{
+	return g_re3FrameLimitFPS;
+}
+
+// Apply the web-shell graphics controls to the same engine settings used by
+// the native frontend menu. LOD is validated so malformed JS values cannot
+// put the renderer outside the slider's supported range.
+extern "C" EMSCRIPTEN_KEEPALIVE void
+re3_SetGraphicsOptions(float lodScale, int motionTrails)
+{
+	if (lodScale < 0.8f || lodScale > 1.8f)
+		return;
+	FrontEndMenuManager.m_PrefsLOD = lodScale;
+	CRenderer::ms_lodDistScale = lodScale;
+	CMBlur::BlurOn = motionTrails != 0;
+}
+
 // Phase 9 (docs/FIRST_BOOT.md): runs exactly one iteration of the same tick()
 // callback emscripten_set_main_loop() drives -- synchronously, on whatever
 // thread calls this (via ccall, i.e. the browser's own JS/CDP execution, not a
@@ -2813,7 +2854,7 @@ main(int argc, char *argv[])
 #endif
 #ifdef __EMSCRIPTEN__
 							g_re3LastFrameLimiterMs = ms;
-							g_re3LastFrameLimiterMaxFPS = RsGlobal.maxFPS;
+							g_re3LastFrameLimiterMaxFPS = g_re3FrameLimitFPS;
 							g_re3LastFrameLimiterEnabled = CMenuManager::m_PrefsFrameLimiter;
 							g_re3LastFrameLimiterWillCall = willCallIdle;
 #endif
