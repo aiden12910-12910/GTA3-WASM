@@ -579,6 +579,14 @@
 		els.renderScale.addEventListener("change", () => {
 			settings.renderScale = Number(els.renderScale.value);
 			save();
+			if (engineStarted) {
+				// Changing the canvas backing store after WebGL/RenderWare have
+				// initialized also requires the engine camera raster to be resized.
+				// Keep the new value for the next page load rather than risking a
+				// stale GL viewport during an active session.
+				els.settingsNote.textContent = "Render scale saved. Reload the page to apply it safely to the WebGL framebuffer.";
+				return;
+			}
 			resizeCanvasToDisplaySize();
 		});
 		els.memoryMode.addEventListener("change", () => {
