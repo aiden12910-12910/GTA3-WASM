@@ -2744,7 +2744,9 @@ CStreaming::MakeSpaceFor(int32 size)
 	// configured cache budget. Free whatever is safely removable, then let the
 	// normal loader handle that one oversized asset rather than looping forever.
 	if(requestedBytes >= ms_memoryAvailable) {
-		DeleteRwObjectsBehindCamera(0);
+		// A single asset larger than the entire target cannot be made to fit by
+		// eviction. Preserve the original streaming behavior and allow that asset
+		// to load, without doing a destructive "evict everything" pass.
 		return;
 	}
 	while(ms_memoryUsed >= ms_memoryAvailable - requestedBytes)
