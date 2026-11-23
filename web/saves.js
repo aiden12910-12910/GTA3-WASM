@@ -95,6 +95,7 @@
 
 	function requestSync() {
 		if (!FS || !saveDir) return Promise.reject(new Error("save directory is not available"));
+		if (!saveMount) return Promise.reject(new Error("persistent save storage is unavailable in this session"));
 		if (state === SYNCING) {
 			pending = true; // coalesce -- never start a second overlapping syncfs()
 			return syncPromise;
@@ -106,8 +107,12 @@
 	/** Called directly from C++ (src/save/PCSave.cpp) right after a save/delete. */
 	function onSaveDirChanged(reason, filename) {
 		logFn(reason === "delete" ? `[Save] Save deleted: ${filename}` : `[Save] Save written: ${filename}`, "info");
-		logFn("[Save] Syncing to IndexedDB…", "info");
-		requestSync().catch(() => {});
+		if (saveMount) {
+			logFn("[Save] Syncing to IndexedDB…", "info");
+			requestSync().catch(() => {});
+		} else {
+			logFn("[Save] Save is available for this session only (IDBFS is unavailable)", "info");
+		}
 	}
 
 	/**
@@ -139,14 +144,10 @@
 			logFn(`[Save] Persistent filesystem mounted at ${saveDir}`, "info");
 		} catch (err) {
 			logFn(`[Save] ERROR: IDBFS unavailable (${err}); saves will not persist across reloads this session`, "stderr");
-			saveDir = null; // disables further sync attempts; the plain MEMFS
-			// directory from mkdirTree() above still lets the game save normally
-			onStateChange(); // the diagnostics panel's own render() only runs on
-			// setState() transitions, and mounting/restoring here happens entirely
-			// outside that state machine (it's a one-time setup step, not a save
-			// sync) -- nudge it once so "Backend"/"Save directory" reflect reality
-			// instead of showing whatever setupSaveDiagnosticsPanel() saw at its own
-			// (pre-mount) initial render.
+			// Keep saveDir pointing at the in-memory directory so import/export still work.
+			// Only persistence is unavailable until the page is reloaded.
+			onStateChange();
+			setSaveButtonsReady(true);
 			return;
 		}
 
@@ -166,6 +167,22 @@
 		return requestSync();
 	}
 
+	/** Download one native PC save slot (.b). */
+	function exportSaveSlot(slot) {
+		if (!FS || !saveDir) throw new Error("save directory is not available");
+		if (!Number.isInteger(slot) || slot < 1 || slot > 8) throw new Error("Choose a slot from 1 to 8.");
+		const name = `GTA3sf${slot}.b`;
+		const path = `${saveDir}/${name}`;
+		if (!FS.analyzePath(path).exists) throw new Error(`Save Slot ${slot} is empty.`);
+		const blob = new Blob([FS.readFile(path)], { type: "application/octet-stream" });
+		const url = URL.createObjectURL(blob);
+		const link = document.createElement("a");
+		link.href = url;
+		link.download = name;
+		link.click();
+		setTimeout(() => URL.revokeObjectURL(url), 1000);
+	}
+
 	/** Read all PC save slots as one portable JSON backup. */
 	function exportSaveBundle() {
 		if (!FS || !saveDir) throw new Error("save directory is not available");
@@ -180,12 +197,15 @@
 	}
 
 	/** Import one native .b save, or a JSON bundle produced by exportSaveBundle(). */
-	async function importSaveFile(file) {
+	async function importSaveFile(file, targetSlot = 1) {
 		if (!FS || !saveDir) throw new Error("save directory is not available");
+		if (!Number.isInteger(targetSlot) || targetSlot < 1 || targetSlot > 8) {
+			throw new Error("Choose a target slot from 1 to 8.");
+		}
 		const writes = [];
 		if (/^GTA3sf[1-8]\.b$/i.test(file.name)) {
 			if (file.size > 5 * 1024 * 1024) throw new Error("The save file is unexpectedly large.");
-			writes.push([file.name, new Uint8Array(await file.arrayBuffer())]);
+			writes.push([`GTA3sf${targetSlot}.b`, new Uint8Array(await file.arrayBuffer())]);
 		} else if (/\.json$/i.test(file.name)) {
 			if (file.size > 32 * 1024 * 1024) throw new Error("The save backup is too large.");
 			const bundle = JSON.parse(await file.text());
@@ -208,8 +228,12 @@
 		const existing = writes.filter(([name]) => FS.analyzePath(`${saveDir}/${name}`).exists);
 		if (existing.length && !confirm(`Overwrite existing save slot(s): ${existing.map(([name]) => name).join(", ")}?`)) return false;
 		for (const [name, data] of writes) FS.writeFile(`${saveDir}/${name}`, data);
-		await requestSync();
-		if (lastSyncResult === "failure") throw new Error(`Save import could not be persisted: ${lastSyncError}`);
+		if (saveMount) {
+			await requestSync();
+			if (lastSyncResult === "failure") throw new Error(`Save import could not be persisted: ${lastSyncError}`);
+		} else {
+			logFn("[Save] Imported save is session-only; it may be lost after reload", "info");
+		}
 		return true;
 	}
 
@@ -224,13 +248,13 @@
 				/* not a plain file (shouldn't happen under userfiles/) -- skip it */
 			}
 		}
-		await syncfsAsync(false);
+		if (saveMount) await syncfsAsync(false);
 		logFn("[Save] Browser saves cleared", "info");
 	}
 
 	function getStatus() {
 		return {
-			backend: FS && saveDir ? "IDBFS" : (FS ? "MEMFS (session-only)" : "not mounted"),
+			backend: FS && saveDir ? (saveMount ? "IDBFS" : "MEMFS (session-only)") : (FS ? "MEMFS (session-only)" : "not mounted"),
 			saveDir,
 			state,
 			lastSyncResult,
@@ -257,9 +281,13 @@
 	let exportButton = null;
 	let importButton = null;
 	let importInput = null;
+	let slotSelect = null;
+	let downloadSlotButton = null;
 	function setSaveButtonsReady(ready) {
 		if (exportButton) exportButton.disabled = !ready;
 		if (importButton) importButton.disabled = !ready;
+		if (slotSelect) slotSelect.disabled = !ready;
+		if (downloadSlotButton) downloadSlotButton.disabled = !ready;
 	}
 
 	function addSaveButtons() {
@@ -275,17 +303,41 @@
 		importButton.id = "save-import-btn";
 		importButton.type = "button";
 		importButton.textContent = "Upload save";
-		importButton.title = "Import a GTA III save file or GTA3-WASM backup from this computer";
+		importButton.title = "Import a GTA III .b save into the selected slot, or restore a JSON bundle";
 		importButton.disabled = true;
+		slotSelect = document.createElement("select");
+		slotSelect.id = "save-slot-select";
+		slotSelect.title = "Target save slot";
+		for (let slot = 1; slot <= 8; slot++) {
+			const option = document.createElement("option");
+			option.value = String(slot);
+			option.textContent = `Slot ${slot}`;
+			slotSelect.appendChild(option);
+		}
+		downloadSlotButton = document.createElement("button");
+		downloadSlotButton.id = "save-slot-export-btn";
+		downloadSlotButton.type = "button";
+		downloadSlotButton.textContent = "Download slot";
+		downloadSlotButton.title = "Download the selected native GTA III save slot";
+		downloadSlotButton.disabled = true;
 		importInput = document.createElement("input");
 		importInput.type = "file";
 		importInput.accept = ".b,.json,application/json";
 		importInput.hidden = true;
 		const spacer = topbar.querySelector(".spacer");
 		topbar.insertBefore(exportButton, spacer || null);
+		topbar.insertBefore(slotSelect, spacer || null);
+		topbar.insertBefore(downloadSlotButton, spacer || null);
 		topbar.insertBefore(importButton, spacer || null);
 		topbar.appendChild(importInput);
 
+		downloadSlotButton.addEventListener("click", () => {
+			try {
+				exportSaveSlot(Number(slotSelect.value));
+			} catch (err) {
+				alert(err.message || String(err));
+			}
+		});
 		exportButton.addEventListener("click", () => {
 			try {
 				const bundle = exportSaveBundle();
@@ -305,7 +357,7 @@
 			if (!file) return;
 			importButton.disabled = true;
 			try {
-				const imported = await importSaveFile(file);
+				const imported = await importSaveFile(file, Number(slotSelect.value));
 				if (imported) alert("Save imported and synced to this browser. Reopen the game's Load Game menu to see it.");
 			} catch (err) {
 				alert(err.message || String(err));
@@ -319,7 +371,7 @@
 
 	function getStatus() {
 		return {
-			backend: FS && saveDir ? "IDBFS" : (FS ? "MEMFS (session-only)" : "not mounted"),
+			backend: FS && saveDir ? (saveMount ? "IDBFS" : "MEMFS (session-only)") : (FS ? "MEMFS (session-only)" : "not mounted"),
 			saveDir,
 			state,
 			lastSyncResult,
@@ -338,6 +390,7 @@
 		forceSync,
 		clearSaves,
 		exportSaveBundle,
+		exportSaveSlot,
 		importSaveFile,
 		getStatus,
 		setOnStateChange,
